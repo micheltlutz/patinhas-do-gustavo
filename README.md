@@ -13,7 +13,7 @@ Cada fase é uma letra feita de blocos de pedra: o filhote pula de bloco em bloc
 
 ## Como se joga
 
-- **Mover:** tocar num bloco vizinho (ou deslizar o dedo) faz o filhote pular. Tocar num bloco longe faz ele ir andando até lá sozinho.
+- **Mover:** cada gesto anda uma casa. Deslizar o dedo para um lado faz o filhote dar um pulo naquela direção (mesmo que o deslize seja comprido); tocar num bloco também dá um pulo só, na direção do toque.
 - **Pintar:** pise em todos os blocos da letra. A barra lá em cima enche de verde.
 - **Casinha:** com a letra toda pintada, a porta abre e uma setinha mostra o caminho.
 - **Ossinhos dourados:** 3 em cada letra (78 no total), para trocar por roupinhas.

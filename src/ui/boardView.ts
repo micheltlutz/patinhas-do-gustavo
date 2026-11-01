@@ -1,12 +1,12 @@
 // O tabuleiro: blocos em 2.5D, o filhote, os objetos e as animações.
 //
-// Toque num bloco vizinho (ou deslize o dedo) para pular; toque num bloco
-// longe e o filhote vai andando até lá sozinho.
+// Cada gesto anda uma casa: deslizar o dedo para um lado (ou tocar num bloco
+// naquela direção) faz o filhote dar um pulo só.
 
 import { sfx } from '../audio/sfx.ts';
 import { isHidden, isLetterKind, requiredOf } from '../game/board.ts';
 import type { Level } from '../game/levels.ts';
-import { DIRS, hint, initialState, isComplete, neighbor, pathTo, step, walkable, type Dir, type GameEvent, type State } from '../game/rules.ts';
+import { hint, initialState, isComplete, neighbor, step, walkable, type Dir, type GameEvent, type State } from '../game/rules.ts';
 import { store } from '../storage.ts';
 import { BONE_SVG, dogSvg } from './dog.ts';
 
@@ -25,6 +25,10 @@ const HOP_MS = 190;
 const TOP = 0.6;
 const SIDE = 0.24;
 const MAX_TILE = 118;
+/** Quanto o dedo precisa andar para contar como deslizar (px). */
+const SWIPE_PX = 18;
+/** Pulos que podem ficar esperando (deslizes rápidos seguidos). */
+const MAX_QUEUE = 2;
 
 const PAW = `<svg viewBox="0 0 40 40" aria-hidden="true"><g fill="currentColor"><ellipse cx="20" cy="26" rx="9" ry="7.5"/><ellipse cx="9.5" cy="15" rx="4" ry="5"/><ellipse cx="17" cy="9.5" rx="4" ry="5"/><ellipse cx="25" cy="9.5" rx="4" ry="5"/><ellipse cx="31" cy="15" rx="4" ry="5"/></g></svg>`;
 const CRATE = `<svg viewBox="0 0 100 100" aria-hidden="true"><rect x="6" y="6" width="88" height="88" rx="10" fill="#C68A4E" stroke="#7B4A21" stroke-width="6"/><path d="M14 14 L86 86 M86 14 L14 86" stroke="#9C6532" stroke-width="9" stroke-linecap="round"/><rect x="6" y="6" width="88" height="88" rx="10" fill="none" stroke="#7B4A21" stroke-width="6"/></svg>`;
@@ -60,7 +64,8 @@ export class BoardView {
   private hintEls: HTMLElement[] = [];
   private queue: Dir[] = [];
   private running = false;
-  private pointer: { id: number; x: number; y: number } | null = null;
+  /** Dedo na tela; `swiped` = já deu o pulo deste deslize. */
+  private pointer: { id: number; x: number; y: number; swiped: boolean } | null = null;
   /** Muda a cada fase carregada (cancela animações antigas). */
   private gen = 0;
   private saidHalf = false;
@@ -74,8 +79,10 @@ export class BoardView {
     this.root.append(this.stage);
     this.dog = document.createElement('div');
     this.root.addEventListener('pointerdown', (e) => this.onDown(e));
+    this.root.addEventListener('pointermove', (e) => this.onMove(e));
     this.root.addEventListener('pointerup', (e) => this.onUp(e));
     this.root.addEventListener('pointercancel', () => (this.pointer = null));
+    this.root.addEventListener('lostpointercapture', () => (this.pointer = null));
     new ResizeObserver(() => this.layout()).observe(this.root);
   }
 
@@ -96,11 +103,12 @@ export class BoardView {
     this.events.onBone(store.bonesOf(level.letter).length);
   }
 
-  /** Um pulo (teclado ou deslizar). */
+  /** Um pulo (teclado, deslizar ou tocar). */
   move(dir: Dir): void {
+    if (!this.state || this.state.won) return;
     this.clearHint();
     this.events.onActivity();
-    this.queue = [dir];
+    if (this.queue.length < MAX_QUEUE) this.queue.push(dir);
     void this.run();
   }
 
@@ -214,27 +222,32 @@ export class BoardView {
 
   private onDown(e: PointerEvent): void {
     if (this.pointer) return;
-    this.pointer = { id: e.pointerId, x: e.clientX, y: e.clientY };
+    this.pointer = { id: e.pointerId, x: e.clientX, y: e.clientY, swiped: false };
+    try {
+      this.root.setPointerCapture(e.pointerId);
+    } catch {
+      // segue sem captura
+    }
+  }
+
+  /** Deslizou o suficiente: um pulo na direção, na hora (sem esperar soltar). */
+  private onMove(e: PointerEvent): void {
+    const p = this.pointer;
+    if (!p || p.id !== e.pointerId || p.swiped) return;
+    const dx = e.clientX - p.x;
+    const dy = e.clientY - p.y;
+    if (Math.hypot(dx, dy) < SWIPE_PX) return;
+    p.swiped = true;
+    this.move(Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 'right' : 'left') : dy > 0 ? 'down' : 'up');
   }
 
   private onUp(e: PointerEvent): void {
     const p = this.pointer;
     if (!p || p.id !== e.pointerId) return;
     this.pointer = null;
-    if (!this.state || this.state.won) return;
-    this.clearHint();
-    this.events.onActivity();
-    const dx = e.clientX - p.x;
-    const dy = e.clientY - p.y;
-    if (Math.hypot(dx, dy) > 28) {
-      // Deslizou: um pulo naquela direção.
-      this.queue = [Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 'right' : 'left') : dy > 0 ? 'down' : 'up'];
-      void this.run();
-      return;
-    }
+    if (p.swiped || !this.state || this.state.won) return;
     const target = this.tileAt(e.clientX, e.clientY);
-    if (target < 0) return;
-    this.tapTile(target);
+    if (target >= 0) this.tapTile(target);
   }
 
   private tileAt(x: number, y: number): number {
@@ -246,41 +259,19 @@ export class BoardView {
     return r * b.cols + c;
   }
 
+  /** Toque num bloco: um pulo na direção dele (no filhote: ele late). */
   private tapTile(target: number): void {
     const s = this.state!;
-    const b = s.board;
-    if (target === s.dog && !this.running) {
-      this.happy();
+    if (target === s.dog) {
+      this.events.onActivity();
+      if (!this.running) this.happy();
       return;
     }
-    const adjacent = DIRS.find((d) => neighbor(b, s.dog, d) === target);
-    if (adjacent) {
-      this.queue = [adjacent];
-      void this.run();
-      return;
-    }
-    if (walkable(s, target)) {
-      const path = pathTo(s, target);
-      if (path) {
-        this.queue = path;
-        void this.run();
-      } else this.cannot();
-      return;
-    }
-    // Água, caixote, portão...: anda até o lado e faz o último pulo na direção dele.
-    let best: Dir[] | null = null;
-    for (const d of DIRS) {
-      const stand = neighbor(b, target, d);
-      if (stand < 0 || !walkable(s, stand)) continue;
-      const path = pathTo(s, stand);
-      if (!path) continue;
-      const last: Dir = d === 'up' ? 'down' : d === 'down' ? 'up' : d === 'left' ? 'right' : 'left';
-      if (!best || path.length + 1 < best.length) best = [...path, last];
-    }
-    if (best) {
-      this.queue = best;
-      void this.run();
-    } else if (b.kinds[target] !== 'void') this.cannot();
+    const [tr, tc] = this.rc(target);
+    const [dr, dc] = this.rc(s.dog);
+    const rows = tr - dr;
+    const cols = tc - dc;
+    this.move(Math.abs(cols) >= Math.abs(rows) ? (cols > 0 ? 'right' : 'left') : rows > 0 ? 'down' : 'up');
   }
 
   // ---------- jogadas e animações ----------
@@ -590,13 +581,6 @@ export class BoardView {
     this.dog.animate([{ transform: 'none' }, { transform: `translateY(${-this.T * 0.3}px) rotate(-6deg)` }, { transform: 'none' }], {
       duration: 380,
       easing: 'ease-out',
-    });
-  }
-
-  private cannot(): void {
-    sfx.bump();
-    this.dog.animate([{ transform: 'none' }, { transform: 'rotate(-7deg)' }, { transform: 'rotate(7deg)' }, { transform: 'none' }], {
-      duration: 360,
     });
   }
 
